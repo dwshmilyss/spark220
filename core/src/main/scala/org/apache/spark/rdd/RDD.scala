@@ -329,12 +329,14 @@ abstract class RDD[T: ClassTag](
    */
   private[spark] def getOrCompute(partition: Partition, context: TaskContext): Iterator[T] = {
     val blockId = RDDBlockId(id, partition.index)
-    var readCachedBlock = true
+    var readCachedBlock = true //是否从缓存中读取
     // This method is called on executors, so we need call SparkEnv.get instead of sc.env.
     SparkEnv.get.blockManager.getOrElseUpdate(blockId, storageLevel, elementClassTag, () => {
       readCachedBlock = false
+      //如果数据不在缓存中，那么就尝试从checkpoint中读取结果迭代计算
       computeOrReadCheckpoint(partition, context)
     }) match {
+        //获取到结果后直接返回
       case Left(blockResult) =>
         if (readCachedBlock) {
           val existingMetrics = context.taskMetrics().inputMetrics

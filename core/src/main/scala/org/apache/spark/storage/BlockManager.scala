@@ -137,9 +137,12 @@ private[spark] class BlockManager(
   private val futureExecutionContext = ExecutionContext.fromExecutorService(
     ThreadUtils.newDaemonCachedThreadPool("block-manager-future", 128))
 
-  // Actual storage of where blocks are kept
   /**
+   * Actual storage of where blocks are kept
+   *
    * 在blockManager被创建的时候创建了MemoryStore和DiskStore两个对象用以存取block。
+   * BlockManager实现了特质BlockEvictionHandler，并重写了dropFromMemory方法，BlockManager在构造MemoryStore时，
+   * 将自身的引用作为blockEvictionHandler参数传递给MemoryStore的构造器，因而BlockEvictionHandler就是BlockManager。
    */
   private[spark] val memoryStore =
     new MemoryStore(conf, blockInfoManager, serializerManager, memoryManager, this)
@@ -509,21 +512,30 @@ private[spark] class BlockManager(
 
   /**
    * Get block from local block manager as an iterator of Java objects.
+   * * 从本地获取block,如果存在返回BlockResult，不存在返回None；
+   * * 如果storage level是磁盘，则还需将得到的block缓存到内存存储，方便下次读取
    */
   def getLocalValues(blockId: BlockId): Option[BlockResult] = {
     logDebug(s"Getting local block $blockId")
+    // 调用blockInfoManager，锁定该block，然后读取block,返回该block的元数据blockInfo，该方法是线程互斥的
     blockInfoManager.lockForReading(blockId) match {
+      // 没有读取到则返回None
       case None =>
         logDebug(s"Block $blockId was not found")
         None
+      // 获取到元数据blockInfo
       case Some(info) =>
+        // 获取存储级别StorageLevel
         val level = info.level
         logDebug(s"Level for block $blockId is $level")
         val taskAttemptId = Option(TaskContext.get()).map(_.taskAttemptId())
+        // 如果使用内存，且内存memoryStore包含这个blockId
         if (level.useMemory && memoryStore.contains(blockId)) {
+          // 如果StorageLevel设定是非序列化的，使用getValues
           val iter: Iterator[Any] = if (level.deserialized) {
             memoryStore.getValues(blockId).get
           } else {
+            // 如果是序列化，使用getBytes()
             serializerManager.dataDeserializeStream(
               blockId, memoryStore.getBytes(blockId).get.toInputStream())(info.classTag)
           }
@@ -533,27 +545,37 @@ private[spark] class BlockManager(
           val ci = CompletionIterator[Any, Iterator[Any]](iter, {
             releaseLock(blockId, taskAttemptId)
           })
+          // 构建一个BlockResult对象返回,这个对象包括数据，读取方式以及字节大小
           Some(new BlockResult(ci, DataReadMethod.Memory, info.size))
-        } else if (level.useDisk && diskStore.contains(blockId)) {
+        }
+        // 如果使用磁盘存储，且diskStore包含这个block则从磁盘获取，并且把结果放入内存
+        else if (level.useDisk && diskStore.contains(blockId)) {
+          // 先读取数据
           val diskData = diskStore.getBytes(blockId)
           val iterToReturn: Iterator[Any] = {
+            //如果需要反序列化，则进行反序列
             if (level.deserialized) {
               val diskValues = serializerManager.dataDeserializeStream(
                 blockId,
                 diskData.toInputStream())(info.classTag)
+              // 先序列化，后将数据放入内存
               maybeCacheDiskValuesInMemory(info, blockId, level, diskValues)
             } else {
+              // 先将数据放入内存
               val stream = maybeCacheDiskBytesInMemory(info, blockId, level, diskData)
                 .map { _.toInputStream(dispose = false) }
                 .getOrElse { diskData.toInputStream() }
+              //序列化返回的值
               serializerManager.dataDeserializeStream(blockId, stream)(info.classTag)
             }
           }
+          // 构建BlockResult返回
           val ci = CompletionIterator[Any, Iterator[Any]](iterToReturn, {
             releaseLockAndDispose(blockId, diskData, taskAttemptId)
           })
           Some(new BlockResult(ci, DataReadMethod.Disk, info.size))
         } else {
+          // 处理本地读取block失败，报告driver这是一个无效的block,将会删除这个block
           handleLocalReadFailure(blockId)
         }
     }
@@ -706,14 +728,19 @@ private[spark] class BlockManager(
    * This acquires a read lock on the block if the block was stored locally and does not acquire
    * any locks if the block was fetched from a remote block manager. The read lock will
    * automatically be freed once the result's `data` iterator is fully consumed.
+   * 读取数据的入口点，会判断数据是否在本地而选择是直接从本地读取还是通过BlockTransferService读取远程数据
    */
   def get[T: ClassTag](blockId: BlockId): Option[BlockResult] = {
+    // 从本地获取数据
     val local = getLocalValues(blockId)
+    // 如果本地获取到了则返回
     if (local.isDefined) {
       logInfo(s"Found block $blockId locally")
       return local
     }
+    // 如果本地没有获取到则从远端获取
     val remote = getRemoteValues[T](blockId)
+    // 如果远端获取到了则返回，没有返回None
     if (remote.isDefined) {
       logInfo(s"Found block $blockId remotely")
       return remote
@@ -760,6 +787,8 @@ private[spark] class BlockManager(
    *
    * @return either a BlockResult if the block was successfully cached, or an iterator if the block
    *         could not be cached.
+   *
+   * 如果指定的block存在，则直接获取，否则调用makeIterator方法去计算block，然后持久化最后返回值
    */
   def getOrElseUpdate[T](
       blockId: BlockId,
@@ -768,6 +797,7 @@ private[spark] class BlockManager(
       makeIterator: () => Iterator[T]): Either[BlockResult, Iterator[T]] = {
     // Attempt to read the block from local or remote storage. If it's present, then we don't need
     // to go through the local-get-or-put path.
+    // 尝试从本地获取数据，如果获取不到则从远端获取
     get[T](blockId)(classTag) match {
       case Some(block) =>
         return Left(block)
@@ -775,10 +805,13 @@ private[spark] class BlockManager(
         // Need to compute the block.
     }
     // Initially we hold no locks on this block.
+    // 如果本地化和远端都没有获取到数据，则调用makeIterator计算，最后将结果写入block
     doPutIterator(blockId, makeIterator, level, classTag, keepReadLock = true) match {
+      // 表示写入成功
       case None =>
         // doPut() didn't hand work back to us, so the block already existed or was successfully
         // stored. Therefore, we now hold a read lock on the block.
+        // 从本地获取数据块
         val blockResult = getLocalValues(blockId).getOrElse {
           // Since we held a read lock between the doPut() and get() calls, the block should not
           // have been evicted, so get() not returning the block indicates some internal error.
@@ -790,11 +823,13 @@ private[spark] class BlockManager(
         // of lock acquisitions is 1 (since the caller will only call release() once).
         releaseLock(blockId)
         Left(blockResult)
+      // 如果写入失败
       case Some(iter) =>
         // The put failed, likely because the data was too large to fit in memory and could not be
         // dropped to disk. Therefore, we need to pass the input iterator back to the caller so
         // that they can decide what to do with the values (e.g. process them without caching).
-       Right(iter)
+        // 如果put操作失败，表示可能是因为数据太大，无法写入内存，又无法被磁盘drop，因此我们需要返回这个iterator给调用者
+      Right(iter)
     }
   }
 

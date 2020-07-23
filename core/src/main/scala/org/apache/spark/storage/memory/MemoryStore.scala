@@ -42,12 +42,30 @@ private sealed trait MemoryEntry[T] {
   def memoryMode: MemoryMode
   def classTag: ClassTag[T]
 }
+
+/**
+ * 非序列化的存储级别使用(StorageLevel.MEMORY_ONLY)
+ * 内部用一个数组保存所有对象的实例
+ * @param value
+ * @param size
+ * @param classTag
+ * @tparam T
+ */
 private case class DeserializedMemoryEntry[T](
     value: Array[T],
     size: Long,
     classTag: ClassTag[T]) extends MemoryEntry[T] {
   val memoryMode: MemoryMode = MemoryMode.ON_HEAP
 }
+
+/**
+ * 序列化的存储级别。例如 StorageLevel.MEMORY_ONLY_SER
+ * 用字节缓冲区（ByteBuffer）来存储二进制数据
+ * @param buffer
+ * @param memoryMode
+ * @param classTag
+ * @tparam T
+ */
 private case class SerializedMemoryEntry[T](
     buffer: ChunkedByteBuffer,
     memoryMode: MemoryMode,
@@ -75,6 +93,15 @@ private[storage] trait BlockEvictionHandler {
 /**
  * Stores blocks in memory, either as Arrays of deserialized Java objects or as
  * serialized ByteBuffers.
+ *
+ * @param conf SparkConf
+ * @param blockInfoManager 即Block信息管理器BlockInfoManager
+ * @param serializerManager 即序列化管理器SerializerManager
+ * @param memoryManager 即内存管理器MemoryManager。MemoryStore存储Block，使用的就是MemoryManager内的maxOnHeapStorageMemory和maxOffHeapStorageMemory两块内存池
+ * @param blockEvictionHandler Block驱逐处理器。blockEvictionHandler用于将Block从内存中驱逐出去。
+ *                             blockEvictionHandler的类型是BlockEvictionHandler，
+ *                             BlockEvictionHandler定义了将对象从内存中移除的接口
+ *                             本质上就是BlockManager
  */
 private[spark] class MemoryStore(
     conf: SparkConf,
@@ -100,7 +127,12 @@ private[spark] class MemoryStore(
   private val unrollMemoryThreshold: Long =
     conf.getLong("spark.storage.unrollMemoryThreshold", 1024 * 1024)
 
-  /** Total amount of memory available for storage, in bytes. */
+  /** Total amount of memory available for storage, in bytes.
+   * MemoryStore用于存储Block的最大内存，其实质为MemoryManger的maxOnHeapStorageMemory和maxOffHeapStorageMemory之和。
+   * 如果MemoryManager为StaticMemoryManager，那么maxMemory的大小是固定的。
+   * 如果MemoryManager为UnifiedMemoryManager，那么 maxMemory的大小是动态变化的
+   *
+   * */
   private def maxMemory: Long = {
     memoryManager.maxOnHeapStorageMemory + memoryManager.maxOffHeapStorageMemory
   }
@@ -124,6 +156,11 @@ private[spark] class MemoryStore(
     memoryUsed - currentUnrollMemory
   }
 
+  /**
+   * 用于获取BlockId对应MemoryEntry（即Block的内存形式）所占用的大小
+   * @param blockId
+   * @return
+   */
   def getSize(blockId: BlockId): Long = {
     entries.synchronized {
       entries.get(blockId).size
@@ -137,6 +174,14 @@ private[spark] class MemoryStore(
    * The caller should guarantee that `size` is correct.
    *
    * @return true if the put() succeeded, false otherwise.
+   *
+   *         将BlockId对应的Block（已经封装为ChunkedByteBuffer）写入内存
+   *         1）从MemoryManager中获取用于存储BlockId对应的Block的逻辑内存。如果获取失败则返回false，否则进入下一步
+   *         2）调用_bytes函数，获取Block的数据，即ChunkedByteBuffer
+   *         3）创建Block对应的SerializedMemoryEntry
+   *         4）将SerializedMemoryEntry放入entries缓存
+   *         5）返回true
+   *         
    */
   def putBytes[T: ClassTag](
       blockId: BlockId,
@@ -618,6 +663,15 @@ private[spark] class MemoryStore(
 
   /**
    * Return the amount of memory currently occupied for unrolling blocks across all tasks.
+   * RDD 在缓存到存储内存之前，Partition 中的数据一般以迭代器（Iterator）的数据结构来访问，这是 Scala 语言中一种遍历数据集合的方法。
+   * 通过 Iterator 可以获取分区中每一条序列化或者非序列化的数据项(Record)，这些 Record 的对象实例在逻辑上占用了
+   * JVM 堆内内存的 other 部分的空间，同一 Partition 的不同 Record 的空间并不连续。
+   *
+   * RDD 在缓存到存储内存之后，Partition 被转换成 Block，Record 在堆内或堆外存储内存中占用一块连续的空间。
+   * 将Partition由不连续的存储空间转换为连续存储空间的过程，Spark称之为"展开"（Unroll）
+   *
+   * 展开Block的行为类似于人们生活中的“占座”，一间教室里有些座位有人，有些则穿着，在座位上放一本书表示有人正在使用，那么别人就不会坐。
+   * 这样可以防止在向内存真正写入数据时，内存不足发生溢出。
    */
   def currentUnrollMemory: Long = memoryManager.synchronized {
     onHeapUnrollMemoryMap.values.sum + offHeapUnrollMemoryMap.values.sum
