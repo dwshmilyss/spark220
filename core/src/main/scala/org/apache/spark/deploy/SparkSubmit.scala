@@ -534,10 +534,10 @@ object SparkSubmit extends CommandLineUtils {
     // In standalone cluster mode, use the REST client to submit the application (Spark 1.3+).
     // All Spark parameters are expected to be passed to the client through system properties.
     if (args.isStandaloneCluster) {
-      if (args.useRest) {
+      if (args.useRest) { //如果使用的是REST client提交的，那么调用RestSubmissionClient，该类也用于mesos cluster模式
         childMainClass = "org.apache.spark.deploy.rest.RestSubmissionClient"
         childArgs += (args.primaryResource, args.mainClass)
-      } else {
+      } else { //否则就调用org.apache.spark.deploy.Client，在此类中会注册Driver
         // In legacy standalone cluster mode, use Client as a wrapper around the user class
         childMainClass = "org.apache.spark.deploy.Client"
         if (args.supervise) { childArgs += "--supervise" }
@@ -753,6 +753,7 @@ object SparkSubmit extends CommandLineUtils {
         e
     }
 
+    // 调用main()
     try {
       mainMethod.invoke(null, childArgs.toArray)
     } catch {

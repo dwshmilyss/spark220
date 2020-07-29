@@ -417,10 +417,14 @@ private[deploy] class Master(
         context.reply(SubmitDriverResponse(self, false, None, msg))
       } else {
         logInfo("Driver submitted " + description.command.mainClass)
+        // 整理Driver信息
         val driver = createDriver(description)
+        // 持久化Driver信息，用于master recovery时恢复Driver
         persistenceEngine.addDriver(driver)
+        // 注册Driver
         waitingDrivers += driver
         drivers.add(driver)
+        // launch Driver 和 launch Executor
         schedule()
 
         // TODO: It might be good to instead have the submission client poll the master to determine
@@ -702,13 +706,24 @@ private[deploy] class Master(
   /**
    * Schedule the currently available resources among waiting apps. This method will be called
    * every time a new app joins or resource availability changes.
+   * 这个方法很重要，启动driver和executor都在这里
+   * 每当有新应用提交或者可用资源发生改变的时候  都会调用这个方法
+   * 可以按F3查看该方法都在哪里调用，可以看到。在receiveAndReply()和receive()两个方法中有很多接收到的指令都调用了这个方法
+   *
+   * 1. 当申请启动Driver的时候这个会执行，但是最后一行的 startExecutorsOnWorkers 方法中的waitingApp是空的(详见startExecutorsOnWorkers)，只是启动Driver。
+   *
+   * 2. 在提交application时也会执行到这个scheduler方法，这个时候就是要启动的Driver是空的(即launchDriver什么都不做)，
+   * 但是会直接运行 startExecutorsOnWorkers 方法给当前的application分配资源
    */
   private def schedule(): Unit = {
+    //判断Master状态，如果master挂了，直接return
     if (state != RecoveryState.ALIVE) {
       return
     }
     // Drivers take strict precedence over executors
+    // 打乱Worker(必须是alive状态)顺序，避免Driver集中。
     val shuffledAliveWorkers = Random.shuffle(workers.toSeq.filter(_.state == WorkerState.ALIVE))
+    //可用的worker数量
     val numWorkersAlive = shuffledAliveWorkers.size
     var curPos = 0
     for (driver <- waitingDrivers.toList) { // iterate over a copy of waitingDrivers
@@ -718,16 +733,21 @@ private[deploy] class Master(
       var launched = false
       var numWorkersVisited = 0
       while (numWorkersVisited < numWorkersAlive && !launched) {
+        //拿到curPos位置对应的worker。等于是随机选出一个
         val worker = shuffledAliveWorkers(curPos)
         numWorkersVisited += 1
+        //找到满足启动driver资源条件的worker
         if (worker.memoryFree >= driver.desc.mem && worker.coresFree >= driver.desc.cores) {
+          //todo  启动driver,启动Driver之后会为当前的application 申请资源
           launchDriver(worker, driver)
           waitingDrivers -= driver
           launched = true
         }
+        //TODO curPos 就是一直加一的往后取 Worker ,一直找到满足资源的worker
         curPos = (curPos + 1) % numWorkersAlive
       }
     }
+    //todo 启动executor
     startExecutorsOnWorkers()
   }
 
@@ -990,10 +1010,17 @@ private[deploy] class Master(
     new DriverInfo(now, newDriverId(date), desc, date)
   }
 
+  /**
+   * 在指定worker中启动driver(cluster模式)
+   * 如果是client模式，则在提交任务的机器上直接启动driver
+   * @param worker
+   * @param driver
+   */
   private def launchDriver(worker: WorkerInfo, driver: DriverInfo) {
     logInfo("Launching driver " + driver.id + " on worker " + worker.id)
     worker.addDriver(driver)
     driver.worker = Some(worker)
+    //调用worker的RpcEndpointRef，向worker发送LaunchDriver的指令
     worker.endpoint.send(LaunchDriver(driver.id, driver.desc))
     driver.state = DriverState.RUNNING
   }

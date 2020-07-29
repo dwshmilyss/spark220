@@ -220,11 +220,14 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
         SparkHadoopUtil.get.startCredentialUpdater(driverConf)
       }
 
+      //todo 创建基于当前Executor的SparkEnv
       val env = SparkEnv.createExecutorEnv(
         driverConf, executorId, hostname, port, cores, cfg.ioEncryptionKey, isLocal = false)
 
+      //todo 注册 CoarseGrainedExecutorBackend，name为Executor
       env.rpcEnv.setupEndpoint("Executor", new CoarseGrainedExecutorBackend(
         env.rpcEnv, driverUrl, executorId, hostname, cores, userClassPath, env))
+      //todo 注册WorkerWatcher，用于关闭 CoarseGrainedExecutorBackend进程
       workerUrl.foreach { url =>
         env.rpcEnv.setupEndpoint("WorkerWatcher", new WorkerWatcher(env.rpcEnv, url))
       }
@@ -233,6 +236,10 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
     }
   }
 
+  /**
+   * 这个Main方法在运行启动命令的时候会被调用
+   * @param args
+   */
   def main(args: Array[String]) {
     var driverUrl: String = null
     var executorId: String = null

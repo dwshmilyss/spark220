@@ -89,6 +89,8 @@ private[deploy] class DriverRunner(
           }
 
           // prepare driver jars and run driver
+          // todo 真正启动driver的函数，其实所谓的Driver就是我们通过spark-submit上传的/path/to/examples.jar
+          // 通过java -cp命令在Worker节点开始运行了，即Launch Driver
           val exitCode = prepareAndRunDriver()
 
           // set final state depending on if forcibly killed and process exit code
@@ -111,6 +113,7 @@ private[deploy] class DriverRunner(
         }
 
         // notify worker of final driver state, possible exception
+        // 最后，将Driver的执行状态返回给Master。
         worker.send(DriverStateChanged(driverId, finalState.get, finalException))
       }
     }.start()
@@ -169,9 +172,11 @@ private[deploy] class DriverRunner(
   }
 
   private[worker] def prepareAndRunDriver(): Int = {
+    //下载要执行的jar到worker本地，要执行的jar就是spark-submit提交的那个打包主程序类的jar。例如spark示例中的/path/to/examples.jar
     val driverDir = createWorkingDirectory()
     val localJarFilename = downloadUserJar(driverDir)
 
+    //替换参数中的 WORKER_URL 和 USER_JAR
     def substituteVariables(argument: String): String = argument match {
       case "{{WORKER_URL}}" => workerUrl
       case "{{USER_JAR}}" => localJarFilename
@@ -179,9 +184,12 @@ private[deploy] class DriverRunner(
     }
 
     // TODO: If we add ability to submit multiple jars they should also be added here
+//     将driver中的额参数组织为Linux命令
+//     通过Java执行组织好的命令，使用java.lang.ProcessBuilder执行
     val builder = CommandUtils.buildProcessBuilder(driverDesc.command, securityManager,
       driverDesc.mem, sparkHome.getAbsolutePath, substituteVariables)
 
+    // 这一步就是启动driver，即执行/path/to/examples.jar中的main方法
     runDriver(builder, driverDir, driverDesc.supervise)
   }
 

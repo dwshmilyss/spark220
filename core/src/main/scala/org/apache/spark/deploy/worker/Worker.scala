@@ -41,22 +41,22 @@ import org.apache.spark.rpc._
 import org.apache.spark.util.{ThreadUtils, Utils}
 
 private[deploy] class Worker(
-    override val rpcEnv: RpcEnv,
-    webUiPort: Int,
-    cores: Int,
-    memory: Int,
-    masterRpcAddresses: Array[RpcAddress],
-    endpointName: String,
-    workDirPath: String = null,
-    val conf: SparkConf,
-    val securityMgr: SecurityManager)
+                              override val rpcEnv: RpcEnv,
+                              webUiPort: Int,
+                              cores: Int,
+                              memory: Int,
+                              masterRpcAddresses: Array[RpcAddress],
+                              endpointName: String,
+                              workDirPath: String = null,
+                              val conf: SparkConf,
+                              val securityMgr: SecurityManager)
   extends ThreadSafeRpcEndpoint with Logging {
 
   private val host = rpcEnv.address.host
   private val port = rpcEnv.address.port
 
   Utils.checkHost(host, "Expected hostname")
-  assert (port > 0)
+  assert(port > 0)
 
   // A scheduled executor used to send messages at the specified time.
   private val forwordMessageScheduler =
@@ -69,6 +69,7 @@ private[deploy] class Worker(
 
   // For worker and executor IDs
   private def createDateFormat = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
+
   // Send a heartbeat every (heartbeat timeout) / 4 milliseconds
   private val HEARTBEAT_MILLIS = conf.getLong("spark.worker.timeout", 60) * 1000 / 4
 
@@ -114,7 +115,7 @@ private[deploy] class Worker(
    */
   private var masterAddressToConnect: Option[RpcAddress] = None
   private var activeMasterUrl: String = ""
-  private[worker] var activeMasterWebUiUrl : String = ""
+  private[worker] var activeMasterWebUiUrl: String = ""
   private var workerWebUiUrl: String = ""
   private val workerUri = RpcEndpointAddress(rpcEnv.address, endpointName).toString
   private var registered = false
@@ -170,6 +171,7 @@ private[deploy] class Worker(
   var memoryUsed = 0
 
   def coresFree: Int = cores - coresUsed
+
   def memoryFree: Int = memory - memoryUsed
 
   private def createWorkDir() {
@@ -178,11 +180,11 @@ private[deploy] class Worker(
       // This sporadically fails - not sure why ... !workDir.exists() && !workDir.mkdirs()
       // So attempting to create and then check if directory was created or not.
       workDir.mkdirs()
-      if ( !workDir.exists() || !workDir.isDirectory) {
+      if (!workDir.exists() || !workDir.isDirectory) {
         logError("Failed to create work directory " + workDir)
         System.exit(1)
       }
-      assert (workDir.isDirectory)
+      assert(workDir.isDirectory)
     } catch {
       case e: Exception =>
         logError("Failed to create work directory " + workDir, e)
@@ -213,8 +215,8 @@ private[deploy] class Worker(
   /**
    * Change to use the new master.
    *
-   * @param masterRef the new master ref
-   * @param uiUrl the new master Web UI address
+   * @param masterRef     the new master ref
+   * @param uiUrl         the new master Web UI address
    * @param masterAddress the new master address which the worker should use to connect in case of
    *                      failure
    */
@@ -261,6 +263,7 @@ private[deploy] class Worker(
         cancelLastRegistrationRetry()
       } else if (connectionAttemptCount <= TOTAL_REGISTRATION_RETRIES) {
         logInfo(s"Retrying connection to master (attempt # $connectionAttemptCount)")
+
         /**
          * Re-register with the active master this worker has been communicating with. If there
          * is none, then it means this worker is still bootstrapping and hasn't established a
@@ -270,11 +273,11 @@ private[deploy] class Worker(
          * if the worker unconditionally attempts to re-register with all masters, the following
          * race condition may arise and cause a "duplicate worker" error detailed in SPARK-4592:
          *
-         *   (1) Master A fails and Worker attempts to reconnect to all masters
-         *   (2) Master B takes over and notifies Worker
-         *   (3) Worker responds by registering with Master B
-         *   (4) Meanwhile, Worker's previous reconnection attempt reaches Master B,
-         *       causing the same Worker to register with Master B twice
+         * (1) Master A fails and Worker attempts to reconnect to all masters
+         * (2) Master B takes over and notifies Worker
+         * (3) Worker responds by registering with Master B
+         * (4) Meanwhile, Worker's previous reconnection attempt reaches Master B,
+         * causing the same Worker to register with Master B twice
          *
          * Instead, if we only register with the known active master, we can assume that the
          * old master must have died because another master has taken over. Note that this is
@@ -414,7 +417,7 @@ private[deploy] class Worker(
         }
 
       case MasterInStandby =>
-        // Ignore. Master not yet ready.
+      // Ignore. Master not yet ready.
     }
   }
 
@@ -423,7 +426,9 @@ private[deploy] class Worker(
       handleRegisterResponse(msg)
 
     case SendHeartbeat =>
-      if (connected) { sendToMaster(Heartbeat(workerId, self)) }
+      if (connected) {
+        sendToMaster(Heartbeat(workerId, self))
+      }
 
     case WorkDirCleanup =>
       // Spin up a separate thread (in a future) to do the dir cleanup; don't tie up worker
@@ -441,7 +446,7 @@ private[deploy] class Worker(
           val appIdFromDir = dir.getName
           val isAppStillRunning = appIds.contains(appIdFromDir)
           dir.isDirectory && !isAppStillRunning &&
-          !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECONDS)
+            !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECONDS)
         }.foreach { dir =>
           logInfo(s"Removing directory: ${dir.getPath}")
           Utils.deleteRecursively(dir)
@@ -465,6 +470,7 @@ private[deploy] class Worker(
       logInfo(s"Master with url $masterUrl requested this worker to reconnect.")
       registerWithMaster()
 
+    //todo 收到启动executor的指令
     case LaunchExecutor(masterUrl, appId, execId, appDesc, cores_, memory_) =>
       if (masterUrl != activeMasterUrl) {
         logWarning("Invalid Master (" + masterUrl + ") attempted to launch executor.")
@@ -518,6 +524,7 @@ private[deploy] class Worker(
             conf,
             appLocalDirs, ExecutorState.RUNNING)
           executors(appId + "/" + execId) = manager
+          //todo 启动
           manager.start()
           coresUsed += cores_
           memoryUsed += memory_
@@ -534,7 +541,7 @@ private[deploy] class Worker(
         }
       }
 
-    case executorStateChanged @ ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
+    case executorStateChanged@ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
       handleExecutorStateChanged(executorStateChanged)
 
     case KillExecutor(masterUrl, appId, execId) =>
@@ -551,6 +558,11 @@ private[deploy] class Worker(
         }
       }
 
+    //todo 接收来自master端发送过来的LaunchDriver指令()
+    //启动Driver,这里说启动的Driver就是 mainClass="org.apache.spark.deploy.worker.DriverWrapper"
+    //这个参数是之前在ClientEndpoint.onStart()就封装好的
+    // Driver启动就是DriverWrapper类启动，DriverWrapper的启动就是在Worker中创建一个Driver 进程，
+    //之后就是启动DriverWrapper的main方法
     case LaunchDriver(driverId, driverDesc) =>
       logInfo(s"Asked to launch driver $driverId")
       val driver = new DriverRunner(
@@ -558,11 +570,12 @@ private[deploy] class Worker(
         driverId,
         workDir,
         sparkHome,
-        driverDesc.copy(command = Worker.maybeUpdateSSLSettings(driverDesc.command, conf)),
+        driverDesc.copy(command = Worker.maybeUpdateSSLSettings(driverDesc.command, conf)),//使用java命令启动，这里面的命令就是之前在ClientEndpoint.onStart()就封装好的
         self,
         workerUri,
         securityMgr)
       drivers(driverId) = driver
+      //todo 启动driver
       driver.start()
 
       coresUsed += driverDesc.cores
@@ -577,7 +590,7 @@ private[deploy] class Worker(
           logError(s"Asked to kill unknown driver $driverId")
       }
 
-    case driverStateChanged @ DriverStateChanged(driverId, state, exception) =>
+    case driverStateChanged@DriverStateChanged(driverId, state, exception) =>
       handleDriverStateChanged(driverStateChanged)
 
     case ReregisterWithMaster =>
@@ -704,7 +717,7 @@ private[deploy] class Worker(
   }
 
   private[worker] def handleExecutorStateChanged(executorStateChanged: ExecutorStateChanged):
-    Unit = {
+  Unit = {
     sendToMaster(executorStateChanged)
     val state = executorStateChanged.state
     if (ExecutorState.isFinished(state)) {
@@ -746,15 +759,15 @@ private[deploy] object Worker extends Logging {
   }
 
   def startRpcEnvAndEndpoint(
-      host: String,
-      port: Int,
-      webUiPort: Int,
-      cores: Int,
-      memory: Int,
-      masterUrls: Array[String],
-      workDir: String,
-      workerNumber: Option[Int] = None,
-      conf: SparkConf = new SparkConf): RpcEnv = {
+                              host: String,
+                              port: Int,
+                              webUiPort: Int,
+                              cores: Int,
+                              memory: Int,
+                              masterUrls: Array[String],
+                              workDir: String,
+                              workerNumber: Option[Int] = None,
+                              conf: SparkConf = new SparkConf): RpcEnv = {
 
     // The LocalSparkCluster runs multiple local sparkWorkerX RPC Environments
     val systemName = SYSTEM_NAME + workerNumber.map(_.toString).getOrElse("")
@@ -779,9 +792,9 @@ private[deploy] object Worker extends Logging {
     val useNLC = "spark.ssl.useNodeLocalConf"
     if (isUseLocalNodeSSLConfig(cmd)) {
       val newJavaOpts = cmd.javaOpts
-          .filter(opt => !opt.startsWith(s"-D$prefix")) ++
-          conf.getAll.collect { case (key, value) if key.startsWith(prefix) => s"-D$key=$value" } :+
-          s"-D$useNLC=true"
+        .filter(opt => !opt.startsWith(s"-D$prefix")) ++
+        conf.getAll.collect { case (key, value) if key.startsWith(prefix) => s"-D$key=$value" } :+
+        s"-D$useNLC=true"
       cmd.copy(javaOpts = newJavaOpts)
     } else {
       cmd

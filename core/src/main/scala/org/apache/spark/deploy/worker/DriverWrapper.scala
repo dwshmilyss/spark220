@@ -26,6 +26,7 @@ import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, U
 /**
  * Utility object for launching driver programs such that they share fate with the Worker process.
  * This is used in standalone cluster mode only.
+ * share fate 的意思是如果此Driver挂了，对应的executor也会停止。至此，Client提交Driver流程结束了。
  */
 object DriverWrapper {
   def main(args: Array[String]) {

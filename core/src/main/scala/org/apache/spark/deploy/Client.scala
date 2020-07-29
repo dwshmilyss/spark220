@@ -66,6 +66,9 @@ private class ClientEndpoint(
         // TODO: We could add an env variable here and intercept it in `sc.addJar` that would
         //       truncate filesystem paths similar to what YARN does. For now, we just require
         //       people call `addJar` assuming the jar is in the same directory.
+        //todo Spark使用DriverWrapper启动用户APP的main函数，而不是直接启动，
+        // 这是为了Driver程序和启动Driver的Worker程序共命运(源码注释中称为share fate)，
+        // 即如果此Worker挂了，对应的Driver也会停止。至此，Client提交Driver流程结束了。
         val mainClass = "org.apache.spark.deploy.worker.DriverWrapper"
 
         val classPathConf = "spark.driver.extraClassPath"
@@ -93,6 +96,7 @@ private class ClientEndpoint(
           driverArgs.cores,
           driverArgs.supervise,
           command)
+        // 向Master 发送 RequestSubmitDriver， 注册Driver
         ayncSendToMasterAndForwardReply[SubmitDriverResponse](
           RequestSubmitDriver(driverDescription))
 
@@ -106,7 +110,9 @@ private class ClientEndpoint(
    * Send the message to master and forward the reply to self asynchronously.
    */
   private def ayncSendToMasterAndForwardReply[T: ClassTag](message: Any): Unit = {
+    // Master HA可能有多个master，也就有多个masterEndpoint
     for (masterEndpoint <- masterEndpoints) {
+      //向Master发送消息，ask(异步，同步的ask是askSync())对应receiveAndReply，
       masterEndpoint.ask[T](message).onComplete {
         case Success(v) => self.send(v)
         case Failure(e) =>
@@ -208,6 +214,7 @@ private class ClientEndpoint(
 
 /**
  * Executable utility for starting and terminating drivers inside of a standalone cluster.
+ * deploy-mode = clinet
  */
 object Client {
   def main(args: Array[String]) {
@@ -226,11 +233,15 @@ object Client {
     }
     Logger.getRootLogger.setLevel(driverArgs.logLevel)
 
+    // 创建driverClient的rpcEnv
     val rpcEnv =
       RpcEnv.create("driverClient", Utils.localHostName(), 0, conf, new SecurityManager(conf))
 
+    // 获取和Master通信的RpcEndpointRef
     val masterEndpoints = driverArgs.masters.map(RpcAddress.fromSparkURL).
       map(rpcEnv.setupEndpointRef(_, Master.ENDPOINT_NAME))
+    //注册 ClientEndpoint，具体的注册动作由 ClientEndpoint 完成。new ClientEndpoint()的时候会调用其生命周期方法。
+    //ClientEndpoint的生命周期方法onStart()使用masterEndpoints，发送RequestSubmitDriver消息给Master，注册Driver
     rpcEnv.setupEndpoint("client", new ClientEndpoint(rpcEnv, driverArgs, masterEndpoints, conf))
 
     rpcEnv.awaitTermination()
