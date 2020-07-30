@@ -40,6 +40,9 @@ import org.apache.spark.util.{RpcUtils, ThreadUtils}
  * back the listener when various events occur.
  *
  * @param masterUrls Each url should look like spark://host:port.
+ *
+ *  这个StandaloneAppClient主要服务于APP，注意和Client(主要服务于Driver)要区分开来。
+ *  主要操作的就是APP和Executor的一些信息
  */
 private[spark] class StandaloneAppClient(
     rpcEnv: RpcEnv,

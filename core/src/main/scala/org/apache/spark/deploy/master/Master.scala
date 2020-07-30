@@ -663,16 +663,20 @@ private[deploy] class Master(
   private def startExecutorsOnWorkers(): Unit = {
     // Right now this is a very simple FIFO scheduler. We keep trying to fit in the first app
     // in the queue, then the second app, etc.
+    // TODO waitingApps 就是之前提交后注册到Master上的app，顺序为FIFO
     for (app <- waitingApps if app.coresLeft > 0) {
       val coresPerExecutor: Option[Int] = app.desc.coresPerExecutor
       // Filter out workers that don't have enough resources to launch an executor
+      // TODO 过滤掉那些没有足够资源启动一个executor的worker，也就是说过滤后的worker至少有资源能启动一个executor
       val usableWorkers = workers.toArray.filter(_.state == WorkerState.ALIVE)
         .filter(worker => worker.memoryFree >= app.desc.memoryPerExecutorMB &&
           worker.coresFree >= coresPerExecutor.getOrElse(1))
         .sortBy(_.coresFree).reverse
+      //TODO 资源调度,assignedCores是为每个worker分配的core数
       val assignedCores = scheduleExecutorsOnWorkers(app, usableWorkers, spreadOutApps)
 
       // Now that we've decided how many cores to allocate on each worker, let's allocate them
+      //todo 根据分配好的assignedCores，在相应的worker节点启动executor
       for (pos <- 0 until usableWorkers.length if assignedCores(pos) > 0) {
         allocateWorkerResourceToExecutors(
           app, assignedCores(pos), coresPerExecutor, usableWorkers(pos))
@@ -695,10 +699,15 @@ private[deploy] class Master(
     // If the number of cores per executor is specified, we divide the cores assigned
     // to this worker evenly among the executors with no remainder.
     // Otherwise, we launch a single executor that grabs all the assignedCores on this worker.
+    /**
+     * 计算executor总数，总数=分配的总core数 / 一个executor所需的core数
+     * 如果executor所需的core数没有指定，则总core数都分配给一个executor
+     */
     val numExecutors = coresPerExecutor.map { assignedCores / _ }.getOrElse(1)
     val coresToAssign = coresPerExecutor.getOrElse(assignedCores)
     for (i <- 1 to numExecutors) {
       val exec = app.addExecutor(worker, coresToAssign)
+      //todo 启动Executor
       launchExecutor(worker, exec)
       app.state = ApplicationState.RUNNING
     }
@@ -755,8 +764,10 @@ private[deploy] class Master(
   private def launchExecutor(worker: WorkerInfo, exec: ExecutorDesc): Unit = {
     logInfo("Launching executor " + exec.fullId + " on worker " + worker.id)
     worker.addExecutor(exec)
+    //TODO 给Worker发送 LaunchExecutor 指令
     worker.endpoint.send(LaunchExecutor(masterUrl,
       exec.application.id, exec.id, exec.application.desc, exec.cores, exec.memory))
+    //todo 给Driver发送Executor信息，用于Driver的4040端口显示
     exec.application.driver.send(
       ExecutorAdded(exec.id, worker.id, worker.hostPort, exec.cores, exec.memory))
   }

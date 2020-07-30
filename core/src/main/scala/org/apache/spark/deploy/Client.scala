@@ -215,6 +215,10 @@ private class ClientEndpoint(
 /**
  * Executable utility for starting and terminating drivers inside of a standalone cluster.
  * deploy-mode = clinet
+ * 这个Client其实是Driver的client。要和AppClient区分开，AppClient其实是APP的client。
+ * 这个Client主要和Master通信，负责发送和接收关于Driver的一些信息。例如：注册或启动Driver
+ * 可以看到同文件里的ClientEndPoint的receive()方法只接收了2个指令
+ * 可以和StandaloneAppClient里面的ClientEndPoint.receive()或receiveAndReply()方法做比较
  */
 object Client {
   def main(args: Array[String]) {

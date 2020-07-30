@@ -479,6 +479,7 @@ private[deploy] class Worker(
           logInfo("Asked to launch executor %s/%d for %s".format(appId, execId, appDesc.name))
 
           // Create the executor's working directory
+          //todo 创建Executor的运行目录，一般在$SPARK_HOME/work/appId/executorId
           val executorDir = new File(workDir, appId + "/" + execId)
           if (!executorDir.mkdirs()) {
             throw new IOException("Failed to create directory " + executorDir)
@@ -507,6 +508,7 @@ private[deploy] class Worker(
             dirs
           })
           appDirectories(appId) = appLocalDirs
+          //todo 通过ExecutorRunner启动Executor
           val manager = new ExecutorRunner(
             appId,
             execId,
@@ -528,6 +530,7 @@ private[deploy] class Worker(
           manager.start()
           coresUsed += cores_
           memoryUsed += memory_
+          //todo 向Master发送ExecutorStateChanged指令
           sendToMaster(ExecutorStateChanged(appId, execId, manager.state, None, None))
         } catch {
           case e: Exception =>

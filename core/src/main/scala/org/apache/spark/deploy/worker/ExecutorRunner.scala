@@ -68,6 +68,7 @@ private[deploy] class ExecutorRunner(
   // make sense to remove this in the future.
   private var shutdownHook: AnyRef = null
 
+  //todo 启动Executor
   private[worker] def start() {
     workerThread = new Thread("ExecutorRunner for " + fullId) {
       override def run() { fetchAndRunExecutor() }
