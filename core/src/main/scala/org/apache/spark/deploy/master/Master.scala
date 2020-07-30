@@ -255,6 +255,7 @@ private[deploy] class Master(
         }
       }
 
+      //todo 以Standalone模式为例，接收来自StandaloneAppClient.registerWithMaster()发送过来的RegisterApplication指令
     case RegisterApplication(description, driver) =>
       // TODO Prevent repeated registrations from some driver
       if (state == RecoveryState.STANDBY) {

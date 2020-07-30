@@ -81,6 +81,7 @@ private[spark] class StandaloneAppClient(
     private val registrationRetryThread =
       ThreadUtils.newDaemonSingleThreadScheduledExecutor("appclient-registration-retry-thread")
 
+    //todo StandaloneSchedulerBackend的start()会初始化StandaloneAppClient，并执行其start()，start方法中注册ClientEndpoint，ClientEndpoint的生命周期方法onStart中会和Master通信，注册APP
     override def onStart(): Unit = {
       try {
         registerWithMaster(1)
@@ -103,7 +104,9 @@ private[spark] class StandaloneAppClient(
               return
             }
             logInfo("Connecting to master " + masterAddress.toSparkURL + "...")
+            //todo 根据master地址获取master的EndpointRef，以便发送rpc消息
             val masterRef = rpcEnv.setupEndpointRef(masterAddress, Master.ENDPOINT_NAME)
+            //todo 向master发送RegisterApplication指令
             masterRef.send(RegisterApplication(appDescription, self))
           } catch {
             case ie: InterruptedException => // Cancelled

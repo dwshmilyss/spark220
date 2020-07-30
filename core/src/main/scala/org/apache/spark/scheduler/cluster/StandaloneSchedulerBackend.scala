@@ -57,6 +57,7 @@ private[spark] class StandaloneSchedulerBackend(
   private val totalExpectedCores = maxCores.getOrElse(0)
 
   override def start() {
+    //todo 调用父类CoarseGrainedSchedulerBackend的start方法
     super.start()
 
     // SPARK-21159. The scheduler backend should only try to connect to the launcher when in client
@@ -112,6 +113,8 @@ private[spark] class StandaloneSchedulerBackend(
       }
     val appDesc = ApplicationDescription(sc.appName, maxCores, sc.executorMemory, command,
       webUrl, sc.eventLogDir, sc.eventLogCodec, coresPerExecutor, initialExecutorLimit)
+    //初始化 StandaloneAppClient，并执行其start方法，start方法中注册ClientEndpoint，
+    //初始化时会调用 ClientEndpoint的生命周期方法onStart()，这时会和Master通信，注册APP
     client = new StandaloneAppClient(sc.env.rpcEnv, masters, appDesc, this, conf)
     client.start()
     launcherBackend.setState(SparkAppHandle.State.SUBMITTED)
