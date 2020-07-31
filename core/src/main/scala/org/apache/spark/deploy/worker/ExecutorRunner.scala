@@ -68,7 +68,7 @@ private[deploy] class ExecutorRunner(
   // make sense to remove this in the future.
   private var shutdownHook: AnyRef = null
 
-  //todo 启动Executor
+  //todo 启动Executor 主要是启动 CoarseGrainedExecutorBackend
   private[worker] def start() {
     workerThread = new Thread("ExecutorRunner for " + fullId) {
       override def run() { fetchAndRunExecutor() }
@@ -139,11 +139,12 @@ private[deploy] class ExecutorRunner(
 
   /**
    * Download and run the executor described in our ApplicationDescription
+   * 主要是启动 CoarseGrainedExecutorBackend
    */
   private def fetchAndRunExecutor() {
     try {
       // Launch the process
-      // 构建拼接Linux命令
+      // 构建拼接Linux命令，这里要启动的 CoarseGrainedExecutorBackend 其实是在 CoarseGrainedSchedulerBackend的子类中封装好的
       val builder = CommandUtils.buildProcessBuilder(appDesc.command, new SecurityManager(conf),
         memory, sparkHome.getAbsolutePath, substituteVariables)
       val command = builder.command()
@@ -166,7 +167,8 @@ private[deploy] class ExecutorRunner(
       builder.environment.put("SPARK_LOG_URL_STDERR", s"${baseUrl}stderr")
       builder.environment.put("SPARK_LOG_URL_STDOUT", s"${baseUrl}stdout")
 
-      //todo 使用ProcessBuilder执行Linux命令启动CoarseGrainedExecutorBackend
+      //todo 使用ProcessBuilder执行java命令启动 CoarseGrainedExecutorBackend
+      //java命令会调用CoarseGrainedExecutorBackend的main方法，main方法中处理命令行传入的参数，然后创建RpcEnv，并注册CoarseGrainedExecutorBackend
       process = builder.start()
       val header = "Spark Executor Command: %s\n%s\n\n".format(
         formattedCommand, "=" * 40)

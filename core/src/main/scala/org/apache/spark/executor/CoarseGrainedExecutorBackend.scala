@@ -60,6 +60,7 @@ private[spark] class CoarseGrainedExecutorBackend(
     rpcEnv.asyncSetupEndpointRefByURI(driverUrl).flatMap { ref =>
       // This is a very fast action so we can use "ThreadUtils.sameThread"
       driver = Some(ref)
+      //todo 向 CoarseGrainedSchedulerBackend 里的DriverEndpoint发送RegisterExecutor消息
       ref.ask[Boolean](RegisterExecutor(executorId, self, hostname, cores, extractLogUrls))
     }(ThreadUtils.sameThread).onComplete {
       // This is a very fast action so we can use "ThreadUtils.sameThread"
@@ -77,6 +78,7 @@ private[spark] class CoarseGrainedExecutorBackend(
   }
 
   override def receive: PartialFunction[Any, Unit] = {
+        //todo 创建 Executor
     case RegisteredExecutor =>
       logInfo("Successfully registered with driver")
       try {
@@ -224,7 +226,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       val env = SparkEnv.createExecutorEnv(
         driverConf, executorId, hostname, port, cores, cfg.ioEncryptionKey, isLocal = false)
 
-      //todo 注册 CoarseGrainedExecutorBackend，name为Executor
+      //todo 注册 CoarseGrainedExecutorBackend，name为Executor，注册之后就会调用 CoarseGrainedExecutorBackend.onStart()
       env.rpcEnv.setupEndpoint("Executor", new CoarseGrainedExecutorBackend(
         env.rpcEnv, driverUrl, executorId, hostname, cores, userClassPath, env))
       //todo 注册WorkerWatcher，用于关闭 CoarseGrainedExecutorBackend进程

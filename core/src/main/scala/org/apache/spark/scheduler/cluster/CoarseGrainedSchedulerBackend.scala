@@ -96,6 +96,12 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
   // The num of current max ExecutorId used to re-register appMaster
   @volatile protected var currentExecutorIdCounter = 0
 
+  /**
+   * Driver的RPC实现，主要负责和Executor通信
+   * 主要和 CoarseGrainedExecutorBackend 通信
+   * @param rpcEnv
+   * @param sparkProperties
+   */
   class DriverEndpoint(override val rpcEnv: RpcEnv, sparkProperties: Seq[(String, String)])
     extends ThreadSafeRpcEndpoint with Logging {
 
@@ -166,7 +172,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           logInfo(s"Rejecting $executorId as it has been blacklisted.")
           executorRef.send(RegisterExecutorFailed(s"Executor is blacklisted: $executorId"))
           context.reply(true)
-        } else {
+        } else {//TODO 主要的业务逻辑
           // If the executor's rpc env is not listening for incoming connections, `hostPort`
           // will be null, and the client connection should be used to contact the executor.
           val executorAddress = if (executorRef.address != null) {
@@ -175,9 +181,11 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
               context.senderAddress
             }
           logInfo(s"Registered executor $executorRef ($executorAddress) with ID $executorId")
+          //修改一些与Executor信息有关的集合和变量，即注册Executor到Driver，Driver使用executorDataMap集合保存Executor信息。
           addressToExecutorId(executorAddress) = executorId
           totalCoreCount.addAndGet(cores)
           totalRegisteredExecutors.addAndGet(1)
+          //todo 构建 ExecutorData对象 这里的executorRef就是CoarseGrainedExecutorBackend(Endpoint)
           val data = new ExecutorData(executorRef, executorRef.address, hostname,
             cores, cores, logUrls)
           // This must be synchronized because variables mutated
@@ -192,11 +200,13 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
               logDebug(s"Decremented number of pending executors ($numPendingExecutors left)")
             }
           }
+          // todo 向 CoarseGrainedExecutorBackend 返回 RegisteredExecutor 信息，然后CoarseGrainedExecutorBackend收到信息后会 new Executor()
           executorRef.send(RegisteredExecutor)
           // Note: some tests expect the reply to come after we put the executor in the map
           context.reply(true)
           listenerBus.post(
             SparkListenerExecutorAdded(System.currentTimeMillis(), executorId, data))
+          //todo 跟启动task相关
           makeOffers()
         }
 
