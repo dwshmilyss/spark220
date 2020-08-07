@@ -61,7 +61,9 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
     getTaskResultExecutor.execute(new Runnable {
       override def run(): Unit = Utils.logUncaughtExceptions {
         try {
+          //todo task返回结果根据其大小构建不同的结构体，这里就是匹配各种结构体，然后处理结果
           val (result, size) = serializer.get().deserialize[TaskResult[_]](serializedData) match {
+              //todo 小于某个阈值（该阈值应该在TaskRunner中可以找到），直接通过网络获取 反序列化结果
             case directResult: DirectTaskResult[_] =>
               if (!taskSetManager.canFetchMoreResults(serializedData.limit())) {
                 return
@@ -71,6 +73,7 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               // "TaskSetManager.handleSuccessfulTask", it does not need to deserialize the value.
               directResult.value(taskResultSerializer.get())
               (directResult, serializedData.limit())
+              //TODO 如果超过设置的阈值，那么通过存储在BlockManager中然后拉取结果数据
             case IndirectTaskResult(blockId, size) =>
               if (!taskSetManager.canFetchMoreResults(size)) {
                 // dropped by executor if size is larger than maxResultSize
@@ -109,7 +112,9 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               a
             }
           }
-
+          //todo 这个方法最终会调用Pool.removeSchedulable()移除调度队列中的TaskSetManager
+          //调用流程 TaskSchedulerImpl.handleSuccessfulTask()-> TaskSetManager.handleSuccessfulTask() -> TaskSetManager.maybeFinishTaskSet()
+          // -> TaskSchedulerImpl.taskSetFinished() -> Pool.removeSchedulable()
           scheduler.handleSuccessfulTask(taskSetManager, tid, result)
         } catch {
           case cnf: ClassNotFoundException =>

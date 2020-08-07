@@ -48,6 +48,7 @@ private[spark] class FIFOSchedulableBuilder(val rootPool: Pool)
     // nothing
   }
 
+  //todo  这里就是把TaskSetManager放入调度池中，更进一步说就是放入调度池的一个queue里
   override def addTaskSetManager(manager: Schedulable, properties: Properties) {
     rootPool.addSchedulable(manager)
   }

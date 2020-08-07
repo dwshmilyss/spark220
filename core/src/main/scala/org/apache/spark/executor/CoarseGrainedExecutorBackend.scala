@@ -91,10 +91,12 @@ private[spark] class CoarseGrainedExecutorBackend(
     case RegisterExecutorFailed(message) =>
       exitExecutor(1, "Slave registration failed: " + message)
 
+      //todo 接收来自 CoarseGrainedSchedulerBackend.DriverEndpoint发送过来的LaunchTask
     case LaunchTask(data) =>
       if (executor == null) {
         exitExecutor(1, "Received LaunchTask command but executor was null")
       } else {
+        //TODO 反序列化得到TaskDescription对象
         val taskDesc = TaskDescription.decode(data.value)
         logInfo("Got assigned task " + taskDesc.taskId)
         executor.launchTask(this, taskDesc)

@@ -118,10 +118,13 @@ private[spark] class TaskSchedulerImpl private[scheduler](
 
   // The set of executors we have on each host; this is used to compute hostsAlive, which
   // in turn is used to decide when we can attain data locality on a given host
+  // todo host -> Set(executors)
   protected val hostToExecutors = new HashMap[String, HashSet[String]]
 
+  //todo rack -> Set(host)
   protected val hostsByRack = new HashMap[String, HashSet[String]]
 
+  //todo executor -> host
   protected val executorIdToHost = new HashMap[String, String]
 
   // Listener object to pass upcalls into
@@ -151,6 +154,10 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     this.dagScheduler = dagScheduler
   }
 
+  /**
+   * 初始化任务调度器，在SparkContext里完成
+   * @param backend
+   */
   def initialize(backend: SchedulerBackend) {
     this.backend = backend
     schedulableBuilder = {
@@ -186,10 +193,13 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     waitBackendReady()
   }
 
+  //TODO 由 DAGScheduler.submitMissingTasks() 调用
   override def submitTasks(taskSet: TaskSet) {
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
     this.synchronized {
+      //构建TaskSetManager，把taskSet放到TaskSetManager(任务集管理器)中，
+      //TaskSetManager继承 Schedulable（可调度元素，就是可调度池队列中的每一个元素）
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
       val stage = taskSet.stageId
       val stageTaskSets =
@@ -202,16 +212,20 @@ private[spark] class TaskSchedulerImpl private[scheduler](
         throw new IllegalStateException(s"more than one active taskSet for stage $stage:" +
           s" ${stageTaskSets.toSeq.map{_._2.taskSet.id}.mkString(",")}")
       }
+      //把任务集管理器增加到指定调度类型(FIFO,FAIR)的调度池中，也就是调度池中的调度队列schedulableQueue中
+      // 默认是 FIFOSchedulableBuilder，所以会调用 FIFOSchedulableBuilder.addTaskSetManager
+      //此时，相当于需要调度的任务已有了，存放在调度池中，下面是用具体的调度算法，按指定的顺序调度池中的任务
       schedulableBuilder.addTaskSetManager(manager, manager.taskSet.properties)
 
       if (!isLocal && !hasReceivedTask) {
+        //todo 定义一个Timer，15秒之后并且每隔15秒判断任务是否启动
         starvationTimer.scheduleAtFixedRate(new TimerTask() {
           override def run() {
-            if (!hasLaunchedTask) {
+            if (!hasLaunchedTask) {//如果没启动就发出警告
               logWarning("Initial job has not accepted any resources; " +
                 "check your cluster UI to ensure that workers are registered " +
                 "and have sufficient resources")
-            } else {
+            } else {//如果已经启动就取消这个Timer
               this.cancel()
             }
           }
@@ -219,6 +233,7 @@ private[spark] class TaskSchedulerImpl private[scheduler](
       }
       hasReceivedTask = true
     }
+    //todo 给任务分配资源 会调用 CoarseGrainedSchedulerBackend.reviveOffers()
     backend.reviveOffers()
   }
 
@@ -278,6 +293,18 @@ private[spark] class TaskSchedulerImpl private[scheduler](
       s" ${manager.parent.name}")
   }
 
+  /**
+   * 根据worker的cpu内核数进行分配，即每次发送几个任务给executor进行启动
+   * 假如TaskSet包含的3个任务，worker的cpu内核数为2，此时就需要把3个任务拆分成两次
+   * 第一次是2个任务，第二次是1个任务
+   * 原则就是：每次并行任务按worker的cpu最大核数来决定
+   * @param taskSet
+   * @param maxLocality
+   * @param shuffledOffers
+   * @param availableCpus
+   * @param tasks
+   * @return
+   */
   private def resourceOfferSingleTaskSet(
       taskSet: TaskSetManager,
       maxLocality: TaskLocality,
@@ -287,11 +314,14 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     var launchedTask = false
     // nodes and executors that are blacklisted for the entire application have already been
     // filtered out by this point
+    // 循环shuffledOffers即每个可用的executor
     for (i <- 0 until shuffledOffers.size) {
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
+      //todo 如果当前executor上可用的cpu cores数大于CPUS_PER_TASK，则进行task的分派。PUS_PER_TASK默认值为1，意思就是1个task使用1个core
       if (availableCpus(i) >= CPUS_PER_TASK) {
         try {
+          //todo taskSet.resourceOffer（为一个task指定executor）若返回非空，那么即task分配成功。
           for (task <- taskSet.resourceOffer(execId, host, maxLocality)) {
             tasks(i) += task
             val tid = task.taskId
@@ -318,22 +348,31 @@ private[spark] class TaskSchedulerImpl private[scheduler](
    * Called by cluster manager to offer resources on slaves. We respond by asking our active task
    * sets for tasks in order of priority. We fill each node with tasks in a round-robin manner so
    * that tasks are balanced across the cluster.
+   * 这个方法就是判断哪个worker有资源可以执行task
+   * 被集群manager调用以提供slaves上的资源。我们通过按照优先顺序询问活动task集中的task来回应。
+   * 我们通过循环的方式将task调度到每个节点上以便tasks在集群中可以保持大致的均衡。
    */
   def resourceOffers(offers: IndexedSeq[WorkerOffer]): Seq[Seq[TaskDescription]] = synchronized {
-    // Mark each slave as alive and remember its hostname
-    // Also track if new executor is added
+    // Mark each slave as alive and remember its hostname 标记每个slave节点为alive，并且记住它的主机名
+    // Also track if new executor is added 同时也追踪是否有新的executor加入
+    // 设置标志位newExecAvail为false，这个标志位是在新的executor被添加时被设置的一个标志，下面在计算任务的本地性规则时会用到
     var newExecAvail = false
+    //循环offers，WorkerOffer为包含executorId、host、cores的结构体，代表集群中的可用executor资源
     for (o <- offers) {
       if (!hostToExecutors.contains(o.host)) {
         hostToExecutors(o.host) = new HashSet[String]()
       }
-      if (!executorIdToRunningTaskIds.contains(o.executorId)) {
+      if (!executorIdToRunningTaskIds.contains(o.executorId)) {//如果不包含该executorId，那么更新hostToExecutors，executorIdToHost，executorIdToRunningTaskIds
         hostToExecutors(o.host) += o.executorId
+        //todo 发送一个ExecutorAdded事件，并由DAGScheduler的handleExecutorAdded()方法处理
         executorAdded(o.executorId, o.host)
+        //executorId -> host映射的集合
         executorIdToHost(o.executorId) = o.host
         executorIdToRunningTaskIds(o.executorId) = HashSet[Long]()
+        //TODO 同时更新标识位为true
         newExecAvail = true
       }
+      //更新hostsByRack
       for (rack <- getRackForHost(o.host)) {
         hostsByRack.getOrElseUpdate(rack, new HashSet[String]()) += o.host
       }
@@ -344,6 +383,7 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     // updating the blacklist is only relevant when task offers are being made.
     blacklistTrackerOpt.foreach(_.applyBlacklistTimeout())
 
+    //过滤出可用的WorkerOffer
     val filteredOffers = blacklistTrackerOpt.map { blacklistTracker =>
       offers.filter { offer =>
         !blacklistTracker.isNodeBlacklisted(offer.host) &&
@@ -351,15 +391,19 @@ private[spark] class TaskSchedulerImpl private[scheduler](
       }
     }.getOrElse(offers)
 
+    //打散WorkOffer以避免总是把task发送到同一组workers上
     val shuffledOffers = shuffleOffers(filteredOffers)
     // Build a list of tasks to assign to each worker.
+    //todo 根据每个WorkOffer的cpu core数构建TaskDescription集合（即一个core对应一个TaskDescription）。参数o.cores为了实现最大程度化的并行
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
+    //根据调度算法获取要启动的TaskSetManager
     val sortedTaskSets = rootPool.getSortedTaskSetQueue
     for (taskSet <- sortedTaskSets) {
       logDebug("parentName: %s, name: %s, runningTasks: %s".format(
         taskSet.parent.name, taskSet.name, taskSet.runningTasks))
       if (newExecAvail) {
+        //如果存在新加入的slave，则调用taskSet的executorAdded()方法，动态调整位置策略级别，这么做很容易理解，新的slave节点加入了，那么随之而来的是数据有可能存在于它上面，那么这时我们就需要重新调整任务本地性规则
         taskSet.executorAdded()
       }
     }
@@ -367,11 +411,18 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     // Take each TaskSet in our scheduling order, and then offer it each node in increasing order
     // of locality levels so that it gets a chance to launch local tasks on all of them.
     // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
+    // 按照位置本地行规则调度每个taskset，最大化实现任务的本地性
+    // 位置本地性规则的顺序是：PROCESS_LOCAL(同进程) > NODE_LOCAL(同节点) > NO_PREF() > RACK_LOCAL(同机架) > ANY
     for (taskSet <- sortedTaskSets) {
       var launchedAnyTask = false
       var launchedTaskAtCurrentMaxLocality = false
+      // 依次取出排序过的TaskSetManager集合中的元素；
+      // 对于每个taskSet，取出其tasks覆盖的所有的locality，从高到低依次遍历每个等级的locality；
+      // 取出了taskSet及本次要处理的locality后，根据该taskSet及locality遍历所有可用的worker
+      // 调用resourceOfferSingleTaskSet()找出可以在各个worker上启动的task，加到tasks:IndexedSeq[ArrayBuffer[TaskDescription]]中
       for (currentMaxLocality <- taskSet.myLocalityLevels) {
         do {
+          //todo resourceOfferSingleTaskSet方法是重点，这里就是根据slave的资源分派task到executor上，这里的tasks里面的TaskDescription就是task和executor的映射
           launchedTaskAtCurrentMaxLocality = resourceOfferSingleTaskSet(
             taskSet, currentMaxLocality, shuffledOffers, availableCpus, tasks)
           launchedAnyTask |= launchedTaskAtCurrentMaxLocality
@@ -396,6 +447,13 @@ private[spark] class TaskSchedulerImpl private[scheduler](
     Random.shuffle(offers)
   }
 
+  /**
+   * task运行结束后的后续一些处理
+   * 例如：移除一些对应关系， 移除调度队列中的数据（这里会调用Pool.removeSchedulable()）
+   * @param tid
+   * @param state
+   * @param serializedData
+   */
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer) {
     var failedExecutor: Option[String] = None
     var reason: Option[ExecutorLossReason] = None
@@ -403,7 +461,7 @@ private[spark] class TaskSchedulerImpl private[scheduler](
       try {
         taskIdToTaskSetManager.get(tid) match {
           case Some(taskSet) =>
-            if (state == TaskState.LOST) {
+            if (state == TaskState.LOST) {//如果为lost，
               // TaskState.LOST is only used by the deprecated Mesos fine-grained scheduling mode,
               // where each executor corresponds to a single task, so mark the executor as failed.
               val execId = taskIdToExecutorId.getOrElse(tid, throw new IllegalStateException(
@@ -411,16 +469,17 @@ private[spark] class TaskSchedulerImpl private[scheduler](
               if (executorIdToRunningTaskIds.contains(execId)) {
                 reason = Some(
                   SlaveLost(s"Task $tid was lost, so marking the executor as lost as well."))
+                //那么说明对应executor lost，则移除该executor(这会出发之后对该executor上的task的重新分配，提交执行)
                 removeExecutor(execId, reason.get)
                 failedExecutor = Some(execId)
               }
             }
-            if (TaskState.isFinished(state)) {
+            if (TaskState.isFinished(state)) {//如果是finished状态
               cleanupTaskState(tid)
-              taskSet.removeRunningTask(tid)
-              if (state == TaskState.FINISHED) {
+              taskSet.removeRunningTask(tid)//将task从对应的taskSet中移除
+              if (state == TaskState.FINISHED) {//如果是成功了，进入task成功处理机制，主要是通过线程池获取task结果
                 taskResultGetter.enqueueSuccessfulTask(taskSet, tid, serializedData)
-              } else if (Set(TaskState.FAILED, TaskState.KILLED, TaskState.LOST).contains(state)) {
+              } else if (Set(TaskState.FAILED, TaskState.KILLED, TaskState.LOST).contains(state)) {///否则进入task的失败处理机制。如果失败次数没有超出阈值，那么会重新提交任务
                 taskResultGetter.enqueueFailedTask(taskSet, tid, state, serializedData)
               }
             }
@@ -436,9 +495,10 @@ private[spark] class TaskSchedulerImpl private[scheduler](
       }
     }
     // Update the DAGScheduler without holding a lock on this, since that can deadlock
-    if (failedExecutor.isDefined) {
+    if (failedExecutor.isDefined) {//如果定义了executor故障转移机制
       assert(reason.isDefined)
       dagScheduler.executorLost(failedExecutor.get, reason.get)
+      //todo 重新提交task
       backend.reviveOffers()
     }
   }

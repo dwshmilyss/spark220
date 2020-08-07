@@ -589,6 +589,7 @@ class DAGScheduler(
     assert(partitions.size > 0)
     val func2 = func.asInstanceOf[(TaskContext, Iterator[_]) => _]
     val waiter = new JobWaiter(this, jobId, partitions.size, resultHandler)
+    //todo 放入一个JobSubmitted事件到队列中
     eventProcessLoop.post(JobSubmitted(
       jobId, rdd, func2, partitions.toArray, callSite, waiter,
       SerializationUtils.clone(properties)))
@@ -927,6 +928,7 @@ class DAGScheduler(
         logDebug("missing: " + missing)
         if (missing.isEmpty) {
           logInfo("Submitting " + stage + " (" + stage.rdd + "), which has no missing parents")
+          //todo 回溯完成，准备提交task
           submitMissingTasks(stage, jobId.get)
         } else {
           for (parent <- missing) {
@@ -945,6 +947,7 @@ class DAGScheduler(
     logDebug("submitMissingTasks(" + stage + ")")
 
     // First figure out the indexes of partition ids to compute.
+    // 找到所有要计算的partition
     val partitionsToCompute: Seq[Int] = stage.findMissingPartitions()
 
     // Use the scheduling pool, job group, description, etc. from an ActiveJob associated
@@ -963,8 +966,10 @@ class DAGScheduler(
         outputCommitCoordinator.stageStart(
           stage = s.id, maxPartitionId = s.rdd.partitions.length - 1)
     }
+    //todo 返回partitionId -> Seq[TaskLocation]的映射
     val taskIdToLocations: Map[Int, Seq[TaskLocation]] = try {
       stage match {
+          //todo getPreferredLocs会获取到partition所在的location信息，这个方法很复杂，以后再研究
         case s: ShuffleMapStage =>
           partitionsToCompute.map { id => (id, getPreferredLocs(stage.rdd, id))}.toMap
         case s: ResultStage =>
@@ -1018,11 +1023,13 @@ class DAGScheduler(
         return
     }
 
+    //划分task集合
     val tasks: Seq[Task[_]] = try {
       val serializedTaskMetrics = closureSerializer.serialize(stage.latestInfo.taskMetrics).array()
       stage match {
         case stage: ShuffleMapStage =>
           stage.pendingPartitions.clear()
+          //因为有多个partition，每一个partition都对应一个ShuffleMapTask
           partitionsToCompute.map { id =>
             val locs = taskIdToLocations(id)
             val part = stage.rdd.partitions(id)
@@ -1033,6 +1040,7 @@ class DAGScheduler(
           }
 
         case stage: ResultStage =>
+          //因为有多个partition，每一个partition都对应一个ResultTask
           partitionsToCompute.map { id =>
             val p: Int = stage.partitions(id)
             val part = stage.rdd.partitions(p)
@@ -1049,9 +1057,11 @@ class DAGScheduler(
         return
     }
 
+    //todo 用上面划分好的task集合构建TaskSet并向TaskSchedulerImpl提交TaskSet
     if (tasks.size > 0) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
+      //todo
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptId, jobId, properties))
       stage.latestInfo.submissionTime = Some(clock.getTimeMillis())
@@ -1662,6 +1672,7 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
 
   /**
    * The main event loop of the DAG scheduler.
+   * 重写父类EventLoop的onReceive方法，从父类的成员eventQueue:LinkedBlockingDeque 中取出事件元素
    */
   override def onReceive(event: DAGSchedulerEvent): Unit = {
     val timerContext = timer.time()
@@ -1673,6 +1684,7 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
   }
 
   private def doOnReceive(event: DAGSchedulerEvent): Unit = event match {
+      //todo 上接 runJob -> submitJob ->  eventProcessLoop.post(JobSubmitted)
     case JobSubmitted(jobId, rdd, func, partitions, callSite, listener, properties) =>
       dagScheduler.handleJobSubmitted(jobId, rdd, func, partitions, callSite, listener, properties)
 

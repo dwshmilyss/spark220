@@ -27,7 +27,7 @@ private[spark] class TaskSet(
     val tasks: Array[Task[_]],
     val stageId: Int,
     val stageAttemptId: Int,
-    val priority: Int,
+    val priority: Int, //这个优先级其实就是在TaskSet生成时的JobId
     val properties: Properties) {
   val id: String = stageId + "." + stageAttemptId
 

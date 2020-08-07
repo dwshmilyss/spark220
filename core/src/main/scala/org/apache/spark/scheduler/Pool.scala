@@ -96,6 +96,12 @@ private[spark] class Pool(
     shouldRevive
   }
 
+  /**
+   * 因为之前在 TaskSchedulerImpl.submitTasks() -> FIFOSchedulableBuilder.addTaskSetManager() 中已经将TaskSetManager添加到任务调度队列中了
+   * 所以这里的schedulableQueue里面放的就是TaskSetManager
+   * 然后根据指定的算法排序，就得到将要执行的TaskSetManager
+   * @return
+   */
   override def getSortedTaskSetQueue: ArrayBuffer[TaskSetManager] = {
     var sortedTaskSetQueue = new ArrayBuffer[TaskSetManager]
     val sortedSchedulableQueue =

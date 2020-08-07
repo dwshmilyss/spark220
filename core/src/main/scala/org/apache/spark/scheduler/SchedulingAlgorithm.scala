@@ -54,13 +54,19 @@ private[spark] class FairSchedulingAlgorithm extends SchedulingAlgorithm {
     val taskToWeightRatio2 = runningTasks2.toDouble / s2.weight.toDouble
 
     var compare = 0
+    // 前者的runningTasks<minShare而后者相反的的话，返回true；
+    // runningTasks为正在运行的tasks数目，minShare为最小共享cores数；
+    // 前面两个if判断的意思是两个TaskSetManager中，如果其中一个正在运行的tasks数目小于最小共享cores数，则优先调度该TaskSetManager
     if (s1Needy && !s2Needy) {
       return true
     } else if (!s1Needy && s2Needy) {
       return false
     } else if (s1Needy && s2Needy) {
+      // 如果两者的正在运行的tasks数目都比最小共享cores数小的话，再比较minShareRatio
+      // minShareRatio为正在运行的tasks数目与最小共享cores数的比率
       compare = minShareRatio1.compareTo(minShareRatio2)
     } else {
+      // 最后比较taskToWeightRatio，即权重使用率，weight代表调度池对资源获取的权重，越大需要越多的资源
       compare = taskToWeightRatio1.compareTo(taskToWeightRatio2)
     }
     if (compare < 0) {

@@ -67,6 +67,11 @@ private[spark] object TaskDescription {
     }
   }
 
+  /**
+   * 把TaskDescription通过DataOutputStream构建成ByteBuffer(其实就是序列化对象)，以便在网络中发送
+   * @param taskDescription
+   * @return
+   */
   def encode(taskDescription: TaskDescription): ByteBuffer = {
     val bytesOut = new ByteBufferOutputStream(4096)
     val dataOut = new DataOutputStream(bytesOut)
@@ -101,6 +106,11 @@ private[spark] object TaskDescription {
     bytesOut.toByteBuffer
   }
 
+  /**
+   * 上面有序列化，这里就有反序列化
+   * @param dataIn
+   * @return
+   */
   private def deserializeStringLongMap(dataIn: DataInputStream): HashMap[String, Long] = {
     val map = new HashMap[String, Long]()
     val mapSize = dataIn.readInt()

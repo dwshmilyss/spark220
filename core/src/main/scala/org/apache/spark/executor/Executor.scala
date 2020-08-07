@@ -170,6 +170,7 @@ private[spark] class Executor(
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription)
     runningTasks.put(taskDescription.taskId, tr)
+    //todo 交给线程池去执行，最终调用TaskRunner.run()
     threadPool.execute(tr)
   }
 
@@ -283,10 +284,14 @@ private[spark] class Executor(
       notifyAll()
     }
 
+    /**
+     * 此方法大致可分为deserialize task、run task、sendback result三部分
+     */
     override def run(): Unit = {
       threadId = Thread.currentThread.getId
       Thread.currentThread.setName(threadName)
       val threadMXBean = ManagementFactory.getThreadMXBean
+      //用于管理每个task的内存
       val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId)
       val deserializeStartTime = System.currentTimeMillis()
       val deserializeStartCpuTime = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
@@ -295,17 +300,21 @@ private[spark] class Executor(
       Thread.currentThread.setContextClassLoader(replClassLoader)
       val ser = env.closureSerializer.newInstance()
       logInfo(s"Running $taskName (TID $taskId)")
+      //给Driver发信息，通知其task的状态为running
       execBackend.statusUpdate(taskId, TaskState.RUNNING, EMPTY_BYTE_BUFFER)
       var taskStart: Long = 0
       var taskStartCpu: Long = 0
+      //计算GC时间
       startGCTime = computeTotalGcTime()
 
       try {
         // Must be set before updateDependencies() is called, in case fetching dependencies
         // requires access to properties contained within (e.g. for access control).
+        //todo deserialize task
         Executor.taskDeserializationProps.set(taskDescription.properties)
-
+        //通过properties获取task中的files和jars，然后从Driver上下载相应的file和jar
         updateDependencies(taskDescription.addedFiles, taskDescription.addedJars)
+        //反序列化task对应的ByteBuffer，等到task对象
         task = ser.deserialize[Task[Any]](
           taskDescription.serializedTask, Thread.currentThread.getContextClassLoader)
         task.localProperties = taskDescription.properties
@@ -326,12 +335,15 @@ private[spark] class Executor(
         env.mapOutputTracker.updateEpoch(task.epoch)
 
         // Run the actual task and measure its runtime.
+        //todo run task
         taskStart = System.currentTimeMillis()
         taskStartCpu = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
           threadMXBean.getCurrentThreadCpuTime
         } else 0L
         var threwException = true
         val value = try {
+          //执行task，Task的子类有两个，ShuffleMapTask和ResultTask，是哪个就调用哪个的runTask()
+          // ShuffleMapTask相比ResultTask多了一个步骤，使用ShuffleWriter将结果写到本地
           val res = task.run(
             taskAttemptId = taskId,
             attemptNumber = taskDescription.attemptNumber,
@@ -340,6 +352,7 @@ private[spark] class Executor(
           res
         } finally {
           val releasedLocks = env.blockManager.releaseAllLocksForTask(taskId)
+          //检查内存泄漏
           val freedMemory = taskMemoryManager.cleanUpAllAllocatedMemory()
 
           if (freedMemory > 0 && !threwException) {
@@ -404,13 +417,15 @@ private[spark] class Executor(
         val resultSize = serializedDirectResult.limit
 
         // directSend = sending directly back to the driver
+        //todo sendback result，判断task返回结果的大小，采用不同的方式处理，丢弃 or 使用blockManager or 直接返回
         val serializedResult: ByteBuffer = {
-          if (maxResultSize > 0 && resultSize > maxResultSize) {
+          if (maxResultSize > 0 && resultSize > maxResultSize) {//如果Result大于1G 直接丢弃。若有必要需要修改 spark.driver.maxResultSize 的值。
             logWarning(s"Finished $taskName (TID $taskId). Result is larger than maxResultSize " +
               s"(${Utils.bytesToString(resultSize)} > ${Utils.bytesToString(maxResultSize)}), " +
               s"dropping it.")
+            //serializedResult 为序列化的 IndirectTaskResult 对象，driver 之后通过该对象是获得不到结果的
             ser.serialize(new IndirectTaskResult[Any](TaskResultBlockId(taskId), resultSize))
-          } else if (resultSize > maxDirectResultSize) {
+          } else if (resultSize > maxDirectResultSize) {//如果resultSize < maxResultSize 但是又大于maxDirectResultSize(默认1M)
             val blockId = TaskResultBlockId(taskId)
             env.blockManager.putBytes(
               blockId,
@@ -418,14 +433,18 @@ private[spark] class Executor(
               StorageLevel.MEMORY_AND_DISK_SER)
             logInfo(
               s"Finished $taskName (TID $taskId). $resultSize bytes result sent via BlockManager)")
+            //这种情况下，会将结果存储到 BlockManager 中。此时，serializedResult 为序列化的 IndirectTaskResult 对象，driver 之后可以通过该对象在 BlockManager 系统中拉取结果
             ser.serialize(new IndirectTaskResult[Any](blockId, resultSize))
-          } else {
+          } else {//resultSize <= maxDirectResultSize，serializedResult 直接就是 serializedDirectResult
             logInfo(s"Finished $taskName (TID $taskId). $resultSize bytes result sent to driver")
             serializedDirectResult
           }
         }
 
         setTaskFinishedAndClearInterruptStatus()
+        //调用 CoarseGrainedExecutorBackend.statusUpdate()返回result给Driver
+        //driver端的 CoarseGrainedSchedulerBackend#DriverEndpoint.receive()
+        //在收到消息后，调用TaskScheduler处理返回结果，其中就会调用Pool类里面的方法移除调度队列中的schedulable
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
 
       } catch {
@@ -498,6 +517,7 @@ private[spark] class Executor(
           }
 
       } finally {
+        //todo 最后无论如何都要把该task从runningTasks中移除
         runningTasks.remove(taskId)
       }
     }

@@ -125,12 +125,15 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     }
 
     override def receive: PartialFunction[Any, Unit] = {
+      //todo TaskRunner.run()执行完task发送来的Result结果
       case StatusUpdate(executorId, taskId, state, data) =>
         scheduler.statusUpdate(taskId, state, data.value)
         if (TaskState.isFinished(state)) {
-          executorDataMap.get(executorId) match {
+          executorDataMap.get(executorId) match {//task完成
             case Some(executorInfo) =>
+              //尝试释放task占用的资源
               executorInfo.freeCores += scheduler.CPUS_PER_TASK
+              //由于结束的task释放了资源，其executor有了新的可用资源，那么接着就尝试给该executor分配新的task
               makeOffers(executorId)
             case None =>
               // Ignoring the update since we don't know about the executor.
@@ -139,6 +142,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           }
         }
 
+        //todo 处理DriverEndPoint发送过来的 ReviveOffers
       case ReviveOffers =>
         makeOffers()
 
@@ -244,6 +248,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         val workOffers = activeExecutors.map { case (id, executorData) =>
           new WorkerOffer(id, executorData.executorHost, executorData.freeCores)
         }.toIndexedSeq
+        //todo 通过调度算法拿到需要启动Seq[Seq[TaskDescription]]
         scheduler.resourceOffers(workOffers)
       }
       if (!taskDescs.isEmpty) {
@@ -264,7 +269,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
       // Make sure no executor is killed while some task is launching on it
       val taskDescs = CoarseGrainedSchedulerBackend.this.synchronized {
         // Filter out executors under killing
-        if (executorIsAlive(executorId)) {
+        if (executorIsAlive(executorId)) {//判断executorId对应的executor是否存活
           val executorData = executorDataMap(executorId)
           val workOffers = IndexedSeq(
             new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))
@@ -287,7 +292,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     private def launchTasks(tasks: Seq[Seq[TaskDescription]]) {
       for (task <- tasks.flatten) {
         val serializedTask = TaskDescription.encode(task)
-        if (serializedTask.limit >= maxRpcMessageSize) {
+        if (serializedTask.limit >= maxRpcMessageSize) { //如果序列化后的对象大于128M，那么就是超出阈值
           scheduler.taskIdToTaskSetManager.get(task.taskId).foreach { taskSetMgr =>
             try {
               var msg = "Serialized task %s:%d was %d bytes, which exceeds max allowed: " +
@@ -306,7 +311,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
 
           logDebug(s"Launching task ${task.taskId} on executor id: ${task.executorId} hostname: " +
             s"${executorData.executorHost}.")
-
+          //todo 发送给 CoarseGrainedExecutorBackend
           executorData.executorEndpoint.send(LaunchTask(new SerializableBuffer(serializedTask)))
         }
       }
@@ -441,6 +446,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     }
   }
 
+  //todo 向DriverEndpoint发送ReviveOffers
   override def reviveOffers() {
     driverEndpoint.send(ReviveOffers)
   }

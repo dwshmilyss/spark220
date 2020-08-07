@@ -125,19 +125,24 @@ private[spark] class TaskSetManager(
   // of failures.
   // Duplicates are handled in dequeueTaskFromList, which ensures that a
   // task hasn't already started running before launching it.
+  //TODO 每个executor上即将被执行的tasks的映射集合
   private val pendingTasksForExecutor = new HashMap[String, ArrayBuffer[Int]]
 
   // Set of pending tasks for each host. Similar to pendingTasksForExecutor,
   // but at host level.
+  //todo 每个host上即将被执行的tasks的映射集合
   private val pendingTasksForHost = new HashMap[String, ArrayBuffer[Int]]
 
   // Set of pending tasks for each rack -- similar to the above.
+  //todo 每个rack上即将被执行的tasks的映射集合
   private val pendingTasksForRack = new HashMap[String, ArrayBuffer[Int]]
 
   // Set containing pending tasks with no locality preferences.
+  //todo 存储所有没有位置信息的即将运行tasks的index索引的集合
   private[scheduler] var pendingTasksWithNoPrefs = new ArrayBuffer[Int]
 
   // Set containing all pending tasks (also used as a stack, as above).
+  //todo  存储所有即将运行tasks的index索引的集合
   private val allPendingTasks = new ArrayBuffer[Int]
 
   // Tasks that can be speculated. Since these will be a small fraction of total
@@ -170,6 +175,7 @@ private[spark] class TaskSetManager(
 
   // Add all our tasks to the pending lists. We do this in reverse order
   // of task index so that tasks with low indices get launched first.
+  // 将所有的tasks添加到pending列表。我们用倒序的任务索引一遍师较低索引的任务可以被优先加载
   for (i <- (0 until numTasks).reverse) {
     addPendingTask(i)
   }
@@ -199,6 +205,7 @@ private[spark] class TaskSetManager(
 
   /** Add a task to all the pending-task lists that it should be on. */
   private def addPendingTask(index: Int) {
+    //todo tasks(index).preferredLocations这个方法其实最终是调用RDD的preferredLocations，也就是说位置的本地性最终还是由RDD的相关子类去实现的
     for (loc <- tasks(index).preferredLocations) {
       loc match {
         case e: ExecutorCacheTaskLocation =>
@@ -450,6 +457,7 @@ private[spark] class TaskSetManager(
         }
       }
 
+      //todo 这个方法是重点
       dequeueTask(execId, host, allowedLocality).map { case ((index, taskLocality, speculative)) =>
         // Found a task; do some bookkeeping and return a task description
         val task = tasks(index)
@@ -981,7 +989,7 @@ private[spark] class TaskSetManager(
   /**
    * Compute the locality levels used in this TaskSet. Assumes that all tasks have already been
    * added to queues using addPendingTask.
-   *
+   * 计算该TaskSet使用的位置策略。假设所有的任务已经通过addPendingTask()被添加入队列
    */
   private def computeValidLocalityLevels(): Array[TaskLocality.TaskLocality] = {
     import TaskLocality.{PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY}
@@ -1006,9 +1014,33 @@ private[spark] class TaskSetManager(
     levels.toArray
   }
 
+  /**
+   * task在执行前都会获取数据的分区信息进行分配，总是会优先将其分配到它要计算的数据（partition）所在节点，尽可能的减少网络传输
+   * 但事实上，有时候有可能是那个节点的计算资源和计算能力满了，task处理数据是需要计算资源的。所以，通常来说，Spark会等待一段时间，看能否将task分配到它要处理数据所在节点上
+   * 一般会默认3s（3s不是绝对的，针对不同的本地化级别可以设置不同等待时长）,重试5次的去分配。一旦超时失败，将会选择一个比上一个本地级别差的级别再一次分配，如果发生了数据传输，
+   * 那么task首先通过blockmanager获取数据，如果本地没有数据，则通过getRemote方法从数据所在节点的blockmanager获取数据并返回至task所在节点
+   * 最好是，task正好分配到它要处理数据所在节点上，这样直接从本地executor对应的BlockManager中获取数据，纯内存传输数据，或带有部分磁盘IO。
+   *
+   * PROCESS_LOCAL：进程本地化，性能最好。指代码和数据在同一个进程中，也就是同一个executor中；计算数据的task由executor执行，此时数据在executor的blockmanager里
+   *
+   * NODE_LOCAL：节点本地化。代码和数据在同一个节点中，数据存储为节点的hdfs block数据块，task在节点的某个executror执行；或者数据和task在同一个节点不同的executor中，数据需要跨进程传输
+   *
+   * NO_PREF：数据从哪里获取都一样，比如从数据库中获取数据，对于task而言没有区别
+   *
+   * RACK_LOCAL：数据和task在一个机架的两个节点上，数据需要通过网络在节点之间进行传输
+   *
+   * ANY：数据和task可能在集群中的任何地方，而且不在一个机架中，性能最差
+   */
   def recomputeLocality() {
+    //首先获取之前的位置level。currentLocalityIndex是有效位置策略级别中的索引，指示当前的位置信息。也就是我们上一个task被launched所使用的Locality Level
     val previousLocalityLevel = myLocalityLevels(currentLocalityIndex)
+    //计算有效位置的level，它是任务集TaskSet中应该使用哪种位置Level的数组，在TaskSetManager对象实例化时即被初始化
     myLocalityLevels = computeValidLocalityLevels()
+    //获取位置策略级别的等待时间。可以通过 SparkConf 进行调整：new SparkConf().set("spark.locality.wait", "10")
+    //默认值： spark.locality.wait，默认为3s
+    //PROCESS_LOCAL ： spark.locality.wait.process   默认为3s
+    //NODE_LOCAL：spark.locality.wait.node
+    //RACK_LOCAL: spark.locality.wait.rack
     localityWaits = myLocalityLevels.map(getLocalityWait)
     currentLocalityIndex = getLocalityIndex(previousLocalityLevel)
   }
