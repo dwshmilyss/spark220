@@ -31,7 +31,7 @@ import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.memory.{MemoryManager, MemoryMode}
 import org.apache.spark.serializer.{SerializationStream, SerializerManager}
-import org.apache.spark.storage.{BlockId, BlockInfoManager, StorageLevel, StreamBlockId}
+import org.apache.spark.storage._
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.{SizeEstimator, Utils}
 import org.apache.spark.util.collection.SizeTrackingVector
@@ -181,7 +181,7 @@ private[spark] class MemoryStore(
    *         3）创建Block对应的SerializedMemoryEntry
    *         4）将SerializedMemoryEntry放入entries缓存
    *         5）返回true
-   *         
+   *
    */
   def putBytes[T: ClassTag](
       blockId: BlockId,
@@ -313,16 +313,15 @@ private[spark] class MemoryStore(
       }
       // Acquire storage memory if necessary to store this block in memory.
       val enoughStorageMemory = {
-        if (unrollMemoryUsedByThisBlock <= size) { //如果unroll申请的内存 < 存储block需要的storage内存
-          // 那么需要申请额外的storage内存
+        if (unrollMemoryUsedByThisBlock <= size) {
           val acquiredExtra =
             memoryManager.acquireStorageMemory(
               blockId, size - unrollMemoryUsedByThisBlock, MemoryMode.ON_HEAP)
-          if (acquiredExtra) {//如果申请成功，调用 transferUnrollToStorage方法将展开Block占用的内存转换为用于存储Block的内存，此转换过程是原子的。
+          if (acquiredExtra) {
             transferUnrollToStorage(unrollMemoryUsedByThisBlock)
           }
           acquiredExtra
-        } else { // unrollMemoryUsedByThisBlock > size 如果unrollMemoryUsedByThisBlock > size，说明用于展开的内存过多，需要向MemoryManager归还多余的空间。归还的内存大小为unrollMemoryUsedByThisBlock - size。
+        } else { // unrollMemoryUsedByThisBlock > size
           // If this task attempt already owns more unroll memory than is necessary to store the
           // block, then release the extra memory that will not be used.
           val excessUnrollMemory = unrollMemoryUsedByThisBlock - size
@@ -634,22 +633,39 @@ private[spark] class MemoryStore(
       //经过第1步的处理，如果freedMemory大于等于space，这说明通过驱逐一定数据的Block，已经为存储BlockId对应的Block腾出了足够的内存空间，
       // 此时需要遍历selectedBlocks中的每个BlockId，并移除每个BlockId对应的Block。
       if (freedMemory >= space) {
-        logInfo(s"${selectedBlocks.size} blocks selected for dropping " +
-          s"(${Utils.bytesToString(freedMemory)} bytes)")
-        for (blockId <- selectedBlocks) {
-          val entry = entries.synchronized { entries.get(blockId) }
-          // This should never be null as only one task should be dropping
-          // blocks and removing entries. However the check is still here for
-          // future safety.
-          if (entry != null) {
-            //真正移除block的操作
-            dropBlock(blockId, entry)
+        var lastSuccessfulBlock = -1
+        try {
+          logInfo(s"${selectedBlocks.size} blocks selected for dropping " +
+            s"(${Utils.bytesToString(freedMemory)} bytes)")
+          (0 until selectedBlocks.size).foreach { idx =>
+            val blockId = selectedBlocks(idx)
+            val entry = entries.synchronized {
+              entries.get(blockId)
+            }
+            // This should never be null as only one task should be dropping
+            // blocks and removing entries. However the check is still here for
+            // future safety.
+            if (entry != null) {
+              dropBlock(blockId, entry)
+              afterDropAction(blockId)
+            }
+            lastSuccessfulBlock = idx
+          }
+          logInfo(s"After dropping ${selectedBlocks.size} blocks, " +
+            s"free memory is ${Utils.bytesToString(maxMemory - blocksMemoryUsed)}")
+          freedMemory
+        } finally {
+          // like BlockManager.doPut, we use a finally rather than a catch to avoid having to deal
+          // with InterruptedException
+          if (lastSuccessfulBlock != selectedBlocks.size - 1) {
+            // the blocks we didn't process successfully are still locked, so we have to unlock them
+            (lastSuccessfulBlock + 1 until selectedBlocks.size).foreach { idx =>
+              val blockId = selectedBlocks(idx)
+              blockInfoManager.unlock(blockId)
+            }
           }
         }
-        logInfo(s"After dropping ${selectedBlocks.size} blocks, " +
-          s"free memory is ${Utils.bytesToString(maxMemory - blocksMemoryUsed)}")
-        freedMemory
-      } else {//经过上面while的处理，这时候如果freedMemory < space，这说明即便驱逐内存中所有符合条件的Block，腾出的空间也不足以存储blockId对应的Block，此时需要当前任务尝试线程释放selectedBlocks中每个BlockId对应的Block的写锁。
+      } else {
         blockId.foreach { id =>
           logInfo(s"Will not store $id")
         }
@@ -660,6 +676,9 @@ private[spark] class MemoryStore(
       }
     }
   }
+
+  // hook for testing, so we can simulate a race
+  protected def afterDropAction(blockId: BlockId): Unit = {}
 
   /**
    * 用于判断本地MemoryStore中是否包含给定的BlockId所应对的Block文件
