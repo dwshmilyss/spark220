@@ -77,7 +77,8 @@ private[spark] class ResultTask[T, U](
       threadMXBean.getCurrentThreadCpuTime
     } else 0L
     val ser = SparkEnv.get.closureSerializer.newInstance()
-    //todo 反序列化得到rdd和func，这里的func就是rdd的各种算子函数 例如map aggreage reduce ....
+    //todo 反序列化得到rdd和func，这里的func就是rdd的各种算子中的函数参数
+    // 例如collect(func) 如果没有指定func，则默认就是一个迭代函数
     val (rdd, func) = ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
       ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
     _executorDeserializeTime = System.currentTimeMillis() - deserializeStartTime
